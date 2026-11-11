@@ -1,0 +1,6 @@
+gemini.cfg
+*.exe
+*.zip
+dist/
+chat_view.html
+Gemini_History/
