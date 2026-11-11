@@ -6,8 +6,9 @@ et peut lancer des commandes sur le PC avec ton accord.
 
 ## Installation
 
-1. Télécharge `GeminiDiagDirect-win32.zip` dans la dernière version (onglet **Releases** du dépôt).
-2. Décompresse-le dans un dossier où tu peux écrire (par exemple `C:\Diag\GeminiDiag`).
+1. Télécharge `GeminiDiagDirect-win32.zip` dans la dernière version (onglet **Releases** du dépôt,
+   pas « Source code »). Il ne contient qu'un fichier : `GeminiDiagDirect.exe`.
+2. Mets l'exe dans un dossier où tu peux écrire (par exemple `C:\Diag\GeminiDiag`).
 3. Lance `GeminiDiagDirect.exe`. Au premier lancement, l'appli te demande ta clé API Gemini
    (à créer sur https://aistudio.google.com/apikey).
 
@@ -30,4 +31,4 @@ aucune installation nécessaire.
 ## Publier une nouvelle version
 
 Change `VERSION` en haut de `GeminiDiagDirect.cs` et pousse sur `main` : GitHub compile l'exe et publie la version
-automatiquement. L'icône est générée par `outils_icone.py`.
+automatiquement.

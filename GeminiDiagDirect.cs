@@ -73,8 +73,7 @@ namespace GeminiDiagDirect
         private Bitmap attachedImageBitmap = null;
         private string currentSessionFile = null;
         private string chatHtmlPath = @"C:\Diag\chat_view.html";
-        private string logoPath = FindAsset("logo.png");
-        private string iconPath = FindAsset("app.ico");
+        private string logoPath = ExtractEmbeddedLogo(); // logo intégré à l'exe : un seul fichier à installer
 
         private int currentFontSize = 14;
         private List<Dictionary<string, object>> chatContents = new List<Dictionary<string, object>>();
@@ -115,8 +114,7 @@ namespace GeminiDiagDirect
 
             try
             {
-                if (iconPath != null) this.Icon = new Icon(iconPath);
-                else this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); // icône intégrée à l'exe
             }
             catch { }
 
@@ -145,14 +143,24 @@ namespace GeminiDiagDirect
 
         // ---------- FICHIERS LOCAUX : ICÔNE, CLÉ API, FICHE GARAGE ----------
 
-        private static string FindAsset(string fileName)
+        // Le logo est intégré dans l'exe ; on l'écrit dans C:\Diag pour l'affichage HTML du chat
+        private static string ExtractEmbeddedLogo()
         {
-            string[] candidates = new string[] { Path.Combine(AppDir, fileName), Path.Combine(DIAG_DIR, fileName) };
-            foreach (string c in candidates)
+            try
             {
-                if (File.Exists(c)) return c;
+                using (Stream rs = typeof(MainForm).Assembly.GetManifestResourceStream("logo.png"))
+                {
+                    if (rs == null) return null;
+                    byte[] data = new byte[rs.Length];
+                    int read = 0;
+                    while (read < data.Length) { int n = rs.Read(data, read, data.Length - read); if (n <= 0) break; read += n; }
+                    Directory.CreateDirectory(DIAG_DIR);
+                    string path = Path.Combine(DIAG_DIR, "gemini_logo.png");
+                    if (!File.Exists(path) || new FileInfo(path).Length != data.Length) File.WriteAllBytes(path, data);
+                    return path;
+                }
             }
-            return null;
+            catch { return null; }
         }
 
         private string LoadApiKey()
