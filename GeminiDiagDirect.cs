@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.IO.Compression;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Net;
@@ -49,20 +50,31 @@ namespace GeminiDiagDirect
         private Button btnNewSession;
         private Button btnLoadHistory;
         private Button btnExportReport;
-        private Button btnQuickMenu;
+        private Button btnGarage;
+        private Button btnApiKey;
         private Button btnFontPlus;
         private Button btnFontMinus;
         private PictureBox picLogo;
         private Panel topBar;
         private Panel bottomBar;
 
-        private string apiKey = ""; // clé retirée du code
+        // Version de l'appli : la changer ici déclenche une nouvelle publication sur GitHub
+        public const string VERSION = "2.0.0";
+        public const string GITHUB_REPO = "kiki32600/GeminiEeepc";
+        public const string UPDATE_ASSET = "GeminiDiagDirect-win32.zip";
+
+        private const string DIAG_DIR = @"C:\Diag";
+        private static readonly string AppDir = Path.GetDirectoryName(Application.ExecutablePath);
+
+        private string apiKey = null; // lue dans C:\Diag\gemini.cfg (jamais dans le code)
+        private string configPath = @"C:\Diag\gemini.cfg";
+        private string garagePath = @"C:\Diag\garage.txt";
         private string attachedFilePath = null;
         private Bitmap attachedImageBitmap = null;
         private string currentSessionFile = null;
         private string chatHtmlPath = @"C:\Diag\chat_view.html";
-        private string logoPath = @"C:\Diag\logo.png";
-        private string iconPath = @"C:\Diag\app.ico";
+        private string logoPath = FindAsset("logo.png");
+        private string iconPath = FindAsset("app.ico");
 
         private int currentFontSize = 14;
         private List<Dictionary<string, object>> chatContents = new List<Dictionary<string, object>>();
@@ -93,7 +105,7 @@ namespace GeminiDiagDirect
 
         public MainForm()
         {
-            this.Text = "GEMINI DIAG DIRECT - Atelier Diag Automobile (Mode Agent Actif)";
+            this.Text = "GEMINI DIAG DIRECT " + VERSION + " - Atelier Diag Automobile (Mode Agent Actif)";
             this.Size = new Size(950, 750);
             this.MinimumSize = new Size(720, 520);
             this.StartPosition = FormStartPosition.CenterScreen;
@@ -101,13 +113,17 @@ namespace GeminiDiagDirect
             this.KeyPreview = true;
             this.BackColor = Color.FromArgb(30, 30, 30);
 
-            if (File.Exists(iconPath))
+            try
             {
-                try { this.Icon = new Icon(iconPath); } catch { }
+                if (iconPath != null) this.Icon = new Icon(iconPath);
+                else this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             }
+            catch { }
 
             Directory.CreateDirectory(@"C:\Diag\Gemini_History");
             Directory.CreateDirectory(@"C:\Diag\Logs_Input");
+            EnsureGarageFile();
+            apiKey = LoadApiKey();
 
             InitUI();
             InitNewSession();
@@ -120,7 +136,246 @@ namespace GeminiDiagDirect
                 if (activeWebRequest != null) { try { activeWebRequest.Abort(); } catch { } }
             };
 
-            LoadAvailableModelsAsync();
+            this.Shown += (s, e) => {
+                if (string.IsNullOrEmpty(apiKey)) AskApiKey(true);
+                LoadAvailableModelsAsync();
+                CheckForUpdateAsync();
+            };
+        }
+
+        // ---------- FICHIERS LOCAUX : ICÔNE, CLÉ API, FICHE GARAGE ----------
+
+        private static string FindAsset(string fileName)
+        {
+            string[] candidates = new string[] { Path.Combine(AppDir, fileName), Path.Combine(DIAG_DIR, fileName) };
+            foreach (string c in candidates)
+            {
+                if (File.Exists(c)) return c;
+            }
+            return null;
+        }
+
+        private string LoadApiKey()
+        {
+            try
+            {
+                if (File.Exists(configPath))
+                {
+                    foreach (string raw in File.ReadAllLines(configPath))
+                    {
+                        string line = raw.Trim();
+                        if (line.Length == 0 || line.StartsWith("#")) continue;
+                        int eq = line.IndexOf('=');
+                        if (eq > 0)
+                        {
+                            string k = line.Substring(0, eq).Trim().ToLower();
+                            if (k == "cle_api" || k == "api_key") return line.Substring(eq + 1).Trim();
+                        }
+                        else return line; // fichier ne contenant que la clé
+                    }
+                }
+            }
+            catch { }
+            string env = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
+            return string.IsNullOrEmpty(env) ? null : env.Trim();
+        }
+
+        private void SaveApiKey(string key)
+        {
+            Directory.CreateDirectory(DIAG_DIR);
+            File.WriteAllText(configPath,
+                "# Configuration de Gemini Diag Direct (ce fichier reste sur ce PC, ne le partage pas)\r\n" +
+                "cle_api=" + key + "\r\n", new UTF8Encoding(false));
+        }
+
+        private void AskApiKey(bool firstStart)
+        {
+            using (Form f = new Form())
+            {
+                f.Text = "Clé API Gemini";
+                f.FormBorderStyle = FormBorderStyle.FixedDialog;
+                f.StartPosition = FormStartPosition.CenterParent;
+                f.MinimizeBox = false; f.MaximizeBox = false;
+                f.ClientSize = new Size(520, 150);
+                f.BackColor = Color.FromArgb(38, 38, 38);
+                f.ForeColor = Color.White;
+                if (this.Icon != null) f.Icon = this.Icon;
+
+                Label lbl = new Label {
+                    Left = 12, Top = 10, Width = 496, Height = 48, Font = new Font("Segoe UI", 9f),
+                    Text = (firstStart ? "Aucune clé API trouvée. " : "") +
+                           "Colle ta clé API Gemini (créée sur aistudio.google.com/apikey). " +
+                           "Elle sera enregistrée dans " + configPath + " sur ce PC uniquement."
+                };
+                TextBox txt = new TextBox {
+                    Left = 12, Top = 64, Width = 496, Font = new Font("Consolas", 10f),
+                    BackColor = Color.FromArgb(22, 22, 22), ForeColor = Color.White,
+                    Text = apiKey ?? ""
+                };
+                Button ok = new Button { Text = "Enregistrer", Left = 318, Top = 104, Width = 92, Height = 30, DialogResult = DialogResult.OK, BackColor = Color.FromArgb(0, 122, 204), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+                Button cancel = new Button { Text = "Annuler", Left = 416, Top = 104, Width = 92, Height = 30, DialogResult = DialogResult.Cancel, BackColor = Color.FromArgb(60, 60, 60), ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+                f.Controls.AddRange(new Control[] { lbl, txt, ok, cancel });
+                f.AcceptButton = ok; f.CancelButton = cancel;
+
+                if (f.ShowDialog(this) == DialogResult.OK && txt.Text.Trim().Length > 0)
+                {
+                    try
+                    {
+                        apiKey = txt.Text.Trim();
+                        SaveApiKey(apiKey);
+                        AppendMessageBlock("system", "SYSTÈME", "🔑 Clé API enregistrée dans <code>" + WebUtility.HtmlEncode(configPath) + "</code>.");
+                        LoadAvailableModelsAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("Impossible d'enregistrer la clé : " + ex.Message);
+                    }
+                }
+            }
+        }
+
+        private const string DEFAULT_GARAGE =
+            "=== MON GARAGE (lu par Gemini au début de chaque conversation) ===\r\n" +
+            "Tu peux modifier ce fichier librement avec le Bloc-notes (bouton « Mon garage » de l'appli).\r\n" +
+            "\r\n" +
+            "[807] Peugeot 807 2.0 16v essence, 136 ch, 2003\r\n" +
+            "  Moteur : EW10J4\r\n" +
+            "  ECU : Magneti Marelli IAW 4MP2.05\r\n" +
+            "  Boîte : manuelle\r\n" +
+            "  Diag : OBDeeepc + câble Tactrix OpenPort 2.0 (ligne K)\r\n" +
+            "\r\n" +
+            "[CX5] Mazda CX-5 2012 diesel Skyactiv-D 2.2, 150 ch\r\n" +
+            "  Boîte : manuelle, 2 roues motrices (traction)\r\n" +
+            "  Diag : FORScan + câble Tactrix OpenPort 2.0 (CAN)\r\n" +
+            "\r\n" +
+            "[CLK] Mercedes CLK 200 Kompressor Cabriolet (A209), fin 2004\r\n" +
+            "  Moteur : M271 1.8 compresseur\r\n" +
+            "  Boîte : automatique\r\n" +
+            "  Diag : DAS + câble Tactrix OpenPort 2.0\r\n" +
+            "\r\n" +
+            "=== MES OUTILS ===\r\n" +
+            "Logiciels : FORScan, DAS, OBDeeepc\r\n" +
+            "Interface : Tactrix OpenPort 2.0 (J2534), utilisée pour tous les véhicules\r\n" +
+            "PC d'atelier : Asus eeePC 1101HA, Windows 10 32 bits\r\n";
+
+        private void EnsureGarageFile()
+        {
+            try
+            {
+                if (!File.Exists(garagePath))
+                    File.WriteAllText(garagePath, DEFAULT_GARAGE, new UTF8Encoding(true));
+            }
+            catch { }
+        }
+
+        private string ReadGarage()
+        {
+            try
+            {
+                if (!File.Exists(garagePath)) return "";
+                byte[] bytes = File.ReadAllBytes(garagePath);
+                // UTF-8 si possible, sinon ANSI (ancien Bloc-notes)
+                try { return new UTF8Encoding(false, true).GetString(bytes).TrimStart('\uFEFF'); }
+                catch (DecoderFallbackException) { return Encoding.Default.GetString(bytes); }
+            }
+            catch { return ""; }
+        }
+
+        private void OpenGarage()
+        {
+            EnsureGarageFile();
+            try { Process.Start("notepad.exe", "\"" + garagePath + "\""); }
+            catch (Exception ex) { MessageBox.Show("Impossible d'ouvrir la fiche garage : " + ex.Message); }
+        }
+
+        // ---------- MISE À JOUR AUTOMATIQUE (Releases GitHub) ----------
+
+        private void CheckForUpdateAsync()
+        {
+            System.Threading.ThreadPool.QueueUserWorkItem(state => {
+                try
+                {
+                    string json;
+                    using (WebClient wc = new WebClient())
+                    {
+                        wc.Headers.Add("User-Agent", "GeminiDiagDirect-updater");
+                        wc.Headers.Add("Accept", "application/vnd.github+json");
+                        wc.Encoding = Encoding.UTF8;
+                        json = wc.DownloadString("https://api.github.com/repos/" + GITHUB_REPO + "/releases/latest");
+                    }
+                    JavaScriptSerializer ser = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+                    Dictionary<string, object> rel = ser.Deserialize<Dictionary<string, object>>(json);
+                    string tag = (rel["tag_name"] as string ?? "").TrimStart('v', 'V');
+                    Version remote, local;
+                    if (!Version.TryParse(tag, out remote) || !Version.TryParse(VERSION, out local) || remote <= local) return;
+
+                    string zipUrl = null;
+                    ArrayList assets = rel.ContainsKey("assets") ? rel["assets"] as ArrayList : null;
+                    if (assets != null)
+                    {
+                        foreach (object a in assets)
+                        {
+                            Dictionary<string, object> ad = a as Dictionary<string, object>;
+                            if (ad != null && (ad["name"] as string) == UPDATE_ASSET) zipUrl = ad["browser_download_url"] as string;
+                        }
+                    }
+                    if (zipUrl == null) return;
+
+                    string notes = rel.ContainsKey("body") ? (rel["body"] as string ?? "") : "";
+                    if (notes.Length > 600) notes = notes.Substring(0, 600) + "…";
+
+                    if (this.IsDisposed || !this.IsHandleCreated) return;
+                    this.Invoke((MethodInvoker)delegate {
+                        DialogResult dr = MessageBox.Show(this,
+                            "Nouvelle version disponible : " + tag + " (tu as la " + VERSION + ").\n\n" + notes +
+                            "\n\nInstaller maintenant ? L'appli va redémarrer.",
+                            "Mise à jour Gemini Diag Direct", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                        if (dr == DialogResult.Yes) ApplyUpdate(zipUrl);
+                    });
+                }
+                catch { } // pas d'internet ou pas encore de version publiée : on ignore
+            });
+        }
+
+        private void ApplyUpdate(string zipUrl)
+        {
+            try
+            {
+                string tmp = Path.Combine(Path.GetTempPath(), "GeminiDiag_maj_" + DateTime.Now.ToString("yyyyMMddHHmmss"));
+                Directory.CreateDirectory(tmp);
+                string zipPath = Path.Combine(tmp, UPDATE_ASSET);
+                string extractDir = Path.Combine(tmp, "fichiers");
+
+                Cursor = Cursors.WaitCursor;
+                using (WebClient wc = new WebClient())
+                {
+                    wc.Headers.Add("User-Agent", "GeminiDiagDirect-updater");
+                    wc.DownloadFile(zipUrl, zipPath);
+                }
+                ZipFile.ExtractToDirectory(zipPath, extractDir);
+                Cursor = Cursors.Default;
+
+                string exe = Application.ExecutablePath;
+                int pid = Process.GetCurrentProcess().Id;
+                string bat = Path.Combine(tmp, "maj.bat");
+                File.WriteAllText(bat,
+                    "@echo off\r\n" +
+                    "echo Mise a jour de Gemini Diag Direct...\r\n" +
+                    ":attente\r\n" +
+                    "tasklist /FI \"PID eq " + pid + "\" | find \"" + pid + "\" >nul && (timeout /t 1 /nobreak >nul & goto attente)\r\n" +
+                    "xcopy /E /I /Y /Q \"" + extractDir + "\\*\" \"" + AppDir.TrimEnd('\\') + "\" >nul\r\n" +
+                    "if errorlevel 1 (echo Echec de la copie vers " + AppDir + " & pause & exit /b 1)\r\n" +
+                    "start \"\" \"" + exe + "\"\r\n", Encoding.Default);
+
+                Process.Start(new ProcessStartInfo { FileName = bat, WindowStyle = ProcessWindowStyle.Minimized, UseShellExecute = true });
+                isCancelled = true;
+                Application.Exit();
+            }
+            catch (Exception ex)
+            {
+                Cursor = Cursors.Default;
+                MessageBox.Show("La mise à jour a échoué : " + ex.Message, "Mise à jour", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void InitUI()
@@ -132,7 +387,7 @@ namespace GeminiDiagDirect
                 SizeMode = PictureBoxSizeMode.Zoom,
                 BackColor = Color.Transparent
             };
-            if (File.Exists(logoPath))
+            if (logoPath != null && File.Exists(logoPath))
             {
                 try {
                     byte[] bytes = File.ReadAllBytes(logoPath);
@@ -146,8 +401,13 @@ namespace GeminiDiagDirect
             btnAttach = CreateStyledButton("📎 Joindre", 48, 9, 90, Color.FromArgb(45, 85, 125));
             btnAttach.Click += (s, e) => SelectAnyFile();
 
-            btnQuickMenu = CreateStyledButton("⚡ Préréglages Diag ▼", 143, 9, 140, Color.FromArgb(50, 70, 95));
-            btnQuickMenu.Click += (s, e) => ShowQuickMenu();
+            btnGarage = CreateStyledButton("🚗 Mon garage", 143, 9, 100, Color.FromArgb(50, 70, 95));
+            btnGarage.Click += (s, e) => OpenGarage();
+
+            btnApiKey = CreateStyledButton("🔑", 248, 9, 35, Color.FromArgb(70, 60, 40));
+            btnApiKey.Click += (s, e) => AskApiKey(false);
+            new ToolTip().SetToolTip(btnApiKey, "Changer la clé API Gemini");
+            new ToolTip().SetToolTip(btnGarage, "Ouvrir la fiche de tes véhicules et outils (lue par Gemini)");
 
             btnNewSession = CreateStyledButton("🔄 Nouveau", 288, 9, 95, Color.FromArgb(55, 55, 55));
             btnNewSession.Click += (s, e) => InitNewSession();
@@ -184,7 +444,7 @@ namespace GeminiDiagDirect
             cmbModel.SelectedIndex = 0;
 
             topBar.Controls.AddRange(new Control[] { 
-                picLogo, btnAttach, btnQuickMenu, btnNewSession, btnLoadHistory, 
+                picLogo, btnAttach, btnGarage, btnApiKey, btnNewSession, btnLoadHistory, 
                 btnExportReport, btnFontMinus, btnFontPlus, lblMod, cmbModel 
             });
 
@@ -273,37 +533,6 @@ namespace GeminiDiagDirect
         {
             currentFontSize = Math.Max(11, Math.Min(24, currentFontSize + delta));
             RenderFullChatHtml();
-        }
-
-        private void ShowQuickMenu()
-        {
-            ContextMenu cm = new ContextMenu();
-            cm.MenuItems.Add("📁 Scanner et analyser le dernier log récent", (s, e) => {
-                txtInput.Text = "Scanne mes logs récents et analyse le dernier relevé enregistré.";
-                SendMessage();
-            });
-            cm.MenuItems.Add("📊 Analyser Live Data (Pression Rail, Turbo & MAF)", (s, e) => {
-                txtInput.Text = "Analyse en détail les paramètres d'injection directe, de pression turbo et de débit d'air par rapport à leurs consignes. Identifie tout écart ou saturation.";
-                txtInput.Focus();
-            });
-            cm.MenuItems.Add("🔍 Recherche panne sur Code Défaut (DTC)", (s, e) => {
-                txtInput.Text = "Procédure de diagnostic pour le code défaut : [Indiquez le code P0xxx]. Donne les contrôles au multimètre/oscilloscope et les causes fréquentes.";
-                txtInput.Focus();
-            });
-            cm.MenuItems.Add("💨 Bilan Dépollution (FAP, Régénération & EGR)", (s, e) => {
-                txtInput.Text = "Évalue l'état du système de dépollution : encrassement FAP, pression différentielle et fonctionnement de la vanne EGR. Affiche une jauge d'état.";
-                txtInput.Focus();
-            });
-            cm.MenuItems.Add("🧪 Corrections débits injecteurs (mg/cp)", (s, e) => {
-                txtInput.Text = "Analyse les valeurs de correction de débit des injecteurs. Les tolérances sont-elles dépassées ? Quel injecteur est suspect ?";
-                txtInput.Focus();
-            });
-            cm.MenuItems.Add("🔌 Détecter mon interface OBD / Ports COM", (s, e) => {
-                txtInput.Text = "Vérifie les ports COM et détecte mon interface de diagnostic USB branchée sur l'ordinateur.";
-                SendMessage();
-            });
-
-            cm.Show(btnQuickMenu, new Point(0, btnQuickMenu.Height));
         }
 
         private void RenderFullChatHtml()
@@ -548,9 +777,9 @@ namespace GeminiDiagDirect
 </head>
 <body>
 <div class='banner'>
-    <img src='file:///C:/Diag/logo.png' width='28' height='28' style='vertical-align:middle; margin-right:8px;' />
+    " + (logoPath != null ? "<img src='" + new Uri(logoPath).AbsoluteUri + "' width='28' height='28' style='vertical-align:middle; margin-right:8px;' />" : "") + @"
     <span class='banner-title'>GEMINI DIAG DIRECT</span>
-    <span class='banner-sub'>• Atelier Diag Automobile (Agent Autonome Actif)</span>
+    <span class='banner-sub'>• Atelier Diag Automobile (Agent Autonome Actif) • v" + VERSION + @"</span>
 </div>
 <div id='chat-container'>" + messagesHtml.ToString() + @"</div>
 </body>
@@ -597,6 +826,9 @@ namespace GeminiDiagDirect
                 "Session prête. <b>Mode Agent Autonome Activé</b>.<br/>" +
                 "• <b>Autonomie fichiers :</b> Dites simplement <i>\"Scanne mes logs récents\"</i> ou <i>\"Analyse le dernier relevé\"</i> et Gemini cherchera et lira le fichier sur le disque tout seul !<br/>" +
                 "• <b>Terminal :</b> Gemini peut inspecter le réseau ou les ports COM avec votre accord.<br/>" +
+                "• <b>Mon garage :</b> " + (File.Exists(garagePath)
+                    ? "fiche chargée, parlez simplement de <i>\"mon 807\"</i>, <i>\"le CX-5\"</i>, <i>\"le CLK\"</i>…"
+                    : "aucune fiche trouvée (bouton 🚗 Mon garage pour la créer).") + "<br/>" +
                 "• <b>Entrée</b> = Envoyer | <b>Maj + Entrée</b> = Saut de ligne.");
         }
 
@@ -741,6 +973,7 @@ namespace GeminiDiagDirect
 
             isAnalyzing = true;
             isCancelled = false;
+            TrimDanglingToolCall();
 
             btnSend.Enabled = true;
             btnSend.Text = "⏹ STOP\n(Annuler)";
@@ -797,6 +1030,25 @@ namespace GeminiDiagDirect
             });
         }
 
+        // Après une annulation, l'historique peut finir par une demande d'outil sans réponse : Gemini la refuserait.
+        private void TrimDanglingToolCall()
+        {
+            if (chatContents.Count == 0) return;
+            Dictionary<string, object> last = chatContents[chatContents.Count - 1];
+            if ((last["role"] as string) != "model") return;
+            IEnumerable parts = last["parts"] as IEnumerable;
+            if (parts == null) return;
+            foreach (object p in parts)
+            {
+                Dictionary<string, object> d = p as Dictionary<string, object>;
+                if (d != null && d.ContainsKey("functionCall"))
+                {
+                    chatContents.RemoveAt(chatContents.Count - 1);
+                    return;
+                }
+            }
+        }
+
         // DÉCLARATION DES OUTILS AUTONOMES POUR GEMINI (FUNCTION CALLING)
         private object[] GetToolsDeclaration()
         {
@@ -842,21 +1094,60 @@ namespace GeminiDiagDirect
             };
         }
 
+        private const string BASE_SYSTEM_PROMPT =
+            "Tu es un ingénieur motoriste et expert technique en diagnostic automobile multimarque autonome. " +
+            "Tu disposes d'outils pour scanner les logs sur le disque, lire les fichiers de relevés directement et inspecter le système ou réseau. " +
+            "Si l'utilisateur demande d'analyser un fichier récent, utilise tes outils pour le chercher et le lire tout seul. " +
+            "Les relevés de l'outil OBDeeepc sont des CSV rangés dans C:\\Diag\\Logs_Input. " +
+            "Mets en forme tes synthèses de valeurs avec des tableaux Markdown (| Col1 | Col2 |). " +
+            "Si tu évalues un taux d'encrassement FAP, un RCO Turbo ou une valeur en pourcentage, intègre directement ce composant visuel HTML dans ta réponse pour un affichage graphique direct : " +
+            "<div class='card'><div class='title'>TITRE DU PARAMETRE</div><div class='gauge-container'><div class='gauge-fill' style='width:XX%;'></div><div class='gauge-text'>XX% - STATUT</div></div><div class='footer-info'><span>Détail 1</span><span>Détail 2</span></div></div>.";
+
+        // Consigne système = consigne de base + fiche garage (relue à chaque envoi : une modif est prise en compte tout de suite)
+        private string BuildSystemPrompt()
+        {
+            string prompt = BASE_SYSTEM_PROMPT;
+            string garage = ReadGarage().Trim();
+            if (garage.Length > 0)
+            {
+                prompt += "\n\n=== FICHE GARAGE DE L'UTILISATEUR ===\n" +
+                          "Voici ses véhicules, ses logiciels de diagnostic et son interface. " +
+                          "Quand il parle d'un véhicule par sa marque, son modèle ou son surnom (par exemple « mon 807 »), " +
+                          "utilise directement ces informations (moteur, ECU, boîte, année) sans les lui redemander. " +
+                          "Adapte tes procédures aux logiciels et à l'interface qu'il possède. " +
+                          "Si une info utile manque dans la fiche, dis-le-lui pour qu'il la complète.\n\n" + garage;
+            }
+            return prompt;
+        }
+
+        private void UiAppend(string role, string title, string html)
+        {
+            if (this.IsDisposed || !this.IsHandleCreated) return;
+            this.Invoke((MethodInvoker)delegate { AppendMessageBlock(role, title, html); });
+        }
+
         // BOUCLE D'AGENT AUTONOME (MULTI-TOURS AVEC APPELS D'OUTILS)
+        // Chaque réponse de Gemini peut contenir plusieurs morceaux (texte, réflexion, un ou plusieurs appels d'outils) :
+        // on les lit TOUS, on garde le tour du modèle intact dans l'historique (signatures de réflexion comprises),
+        // on affiche le texte, on exécute chaque outil demandé, puis on relance Gemini avec les résultats.
         private void ExecuteAgentLoop(string model)
         {
-            int maxIterations = 5;
+            int maxIterations = 10;
             int iteration = 0;
 
             try
             {
                 JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
 
+                if (string.IsNullOrEmpty(apiKey))
+                {
+                    UiAppend("error", "CLÉ API MANQUANTE", "Aucune clé API Gemini. Clique sur le bouton 🔑 pour la saisir.");
+                    return;
+                }
+
                 Dictionary<string, object> systemInstruction = new Dictionary<string, object> {
                     { "parts", new object[] {
-                        new Dictionary<string, string> {
-                            { "text", "Tu es un ingénieur motoriste et expert technique en diagnostic automobile multimarque autonome. Tu disposes d'outils pour scanner les logs sur le disque, lire les fichiers de relevés directement et inspecter le système ou réseau. Si l'utilisateur demande d'analyser un fichier récent, utilise tes outils pour le chercher et le lire tout seul. Mets en forme tes synthèses de valeurs avec des tableaux Markdown (| Col1 | Col2 |). Si tu évalues un taux d'encrassement FAP, un RCO Turbo ou une valeur en pourcentage, intègre directement ce composant visuel HTML dans ta réponse pour un affichage graphique direct : <div class='card'><div class='title'>TITRE DU PARAMETRE</div><div class='gauge-container'><div class='gauge-fill' style='width:XX%;'></div><div class='gauge-text'>XX% - STATUT</div></div><div class='footer-info'><span>Détail 1</span><span>Détail 2</span></div></div>." }
-                        }
+                        new Dictionary<string, string> { { "text", BuildSystemPrompt() } }
                     }}
                 };
 
@@ -864,7 +1155,7 @@ namespace GeminiDiagDirect
                 {
                     if (isCancelled) return;
                     iteration++;
-                    string url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + apiKey;
+                    string url = "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent";
 
                     Dictionary<string, object> requestBody = new Dictionary<string, object> {
                         { "systemInstruction", systemInstruction },
@@ -886,6 +1177,7 @@ namespace GeminiDiagDirect
                             HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
                             req.Method = "POST";
                             req.ContentType = "application/json";
+                            req.Headers.Add("x-goog-api-key", apiKey); // la clé ne passe plus dans l'adresse
                             req.ContentLength = data.Length;
                             req.Timeout = 180000;
                             activeWebRequest = req;
@@ -906,13 +1198,14 @@ namespace GeminiDiagDirect
                         {
                             if (isCancelled || wex.Status == WebExceptionStatus.RequestCanceled) return;
 
-                            if (wex.Status == WebExceptionStatus.NameResolutionFailure || wex.Status == WebExceptionStatus.ConnectFailure || wex.Status == WebExceptionStatus.Timeout)
+                            bool transient = wex.Status == WebExceptionStatus.NameResolutionFailure || wex.Status == WebExceptionStatus.ConnectFailure || wex.Status == WebExceptionStatus.Timeout;
+                            HttpWebResponse hr = wex.Response as HttpWebResponse;
+                            if (hr != null && ((int)hr.StatusCode == 429 || (int)hr.StatusCode == 503 || (int)hr.StatusCode == 500)) transient = true;
+
+                            if (transient && netAttempts < 3)
                             {
-                                if (netAttempts < 3)
-                                {
-                                    System.Threading.Thread.Sleep(1500);
-                                    continue;
-                                }
+                                System.Threading.Thread.Sleep(1500 * netAttempts);
+                                continue;
                             }
                             throw;
                         }
@@ -922,72 +1215,94 @@ namespace GeminiDiagDirect
 
                     Dictionary<string, object> respObj = serializer.Deserialize<Dictionary<string, object>>(responseJson);
 
-                    ArrayList candidates = respObj["candidates"] as ArrayList;
-                    if (candidates == null || candidates.Count == 0) break;
-
-                    Dictionary<string, object> cand = candidates[0] as Dictionary<string, object>;
-                    Dictionary<string, object> content = cand["content"] as Dictionary<string, object>;
-                    ArrayList replyParts = content["parts"] as ArrayList;
-                    if (replyParts == null || replyParts.Count == 0) break;
-
-                    Dictionary<string, object> firstPart = replyParts[0] as Dictionary<string, object>;
-
-                    // 1. SI GEMINI DEMANDE UN APPEL D'OUTIL (FUNCTION CALL)
-                    if (firstPart.ContainsKey("functionCall"))
+                    ArrayList candidates = respObj.ContainsKey("candidates") ? respObj["candidates"] as ArrayList : null;
+                    if (candidates == null || candidates.Count == 0)
                     {
-                        Dictionary<string, object> funcCall = firstPart["functionCall"] as Dictionary<string, object>;
-                        string funcName = (string)funcCall["name"];
-                        Dictionary<string, object> args = funcCall.ContainsKey("args") ? funcCall["args"] as Dictionary<string, object> : new Dictionary<string, object>();
-
-                        // Ajouter la réponse du modèle avec son functionCall dans l'historique
-                        chatContents.Add(new Dictionary<string, object> {
-                            { "role", "model" },
-                            { "parts", new object[] { firstPart } }
-                        });
-
-                        // Exécution de l'outil en local
-                        Dictionary<string, object> toolResult = ExecuteLocalTool(funcName, args);
-
-                        // Ajouter le résultat de l'outil pour Gemini
-                        Dictionary<string, object> funcRespPart = new Dictionary<string, object> {
-                            { "functionResponse", new Dictionary<string, object> {
-                                { "name", funcName },
-                                { "response", toolResult }
-                            }}
-                        };
-
-                        chatContents.Add(new Dictionary<string, object> {
-                            { "role", "user" },
-                            { "parts", new object[] { funcRespPart } }
-                        });
-
-                        // On boucle pour que Gemini analyse le résultat de l'outil !
-                        continue;
-                    }
-
-                    // 2. SI GEMINI RENVOIE UNE RÉPONSE TEXTE FINALE
-                    if (firstPart.ContainsKey("text"))
-                    {
-                        string reply = (string)firstPart["text"];
-
-                        chatContents.Add(new Dictionary<string, object> {
-                            { "role", "model" },
-                            { "parts", new object[] { new Dictionary<string, object> { { "text", reply } } } }
-                        });
-
-                        SaveSession();
-
-                        string formattedHtml = MarkdownToHtml(reply);
-
-                        if (!this.IsDisposed && this.IsHandleCreated)
-                        {
-                            this.Invoke((MethodInvoker)delegate {
-                                AppendMessageBlock("gemini", "GEMINI (" + model + ")", formattedHtml);
-                            });
-                        }
+                        string why = respObj.ContainsKey("promptFeedback") ? serializer.Serialize(respObj["promptFeedback"]) : "aucun détail";
+                        UiAppend("error", "GEMINI (" + model + ")", "Gemini n'a renvoyé aucune réponse (" + WebUtility.HtmlEncode(why) + ").");
                         return;
                     }
+
+                    Dictionary<string, object> cand = candidates[0] as Dictionary<string, object>;
+                    string finishReason = (cand != null && cand.ContainsKey("finishReason")) ? cand["finishReason"] as string : "";
+                    Dictionary<string, object> content = (cand != null && cand.ContainsKey("content")) ? cand["content"] as Dictionary<string, object> : null;
+                    ArrayList replyParts = (content != null && content.ContainsKey("parts")) ? content["parts"] as ArrayList : null;
+                    if (replyParts == null || replyParts.Count == 0)
+                    {
+                        UiAppend("error", "GEMINI (" + model + ")", "Réponse vide de Gemini (motif : " + WebUtility.HtmlEncode(finishReason ?? "inconnu") + ").");
+                        return;
+                    }
+
+                    // Tour du modèle conservé tel quel (indispensable pour les modèles qui « réfléchissent »)
+                    chatContents.Add(new Dictionary<string, object> {
+                        { "role", "model" },
+                        { "parts", replyParts }
+                    });
+
+                    StringBuilder replyText = new StringBuilder();
+                    List<Dictionary<string, object>> calls = new List<Dictionary<string, object>>();
+                    foreach (object po in replyParts)
+                    {
+                        Dictionary<string, object> part = po as Dictionary<string, object>;
+                        if (part == null) continue;
+                        if (part.ContainsKey("thought") && part["thought"] is bool && (bool)part["thought"]) continue; // résumé de réflexion : pas affiché
+                        if (part.ContainsKey("functionCall"))
+                        {
+                            Dictionary<string, object> fc = part["functionCall"] as Dictionary<string, object>;
+                            if (fc != null) calls.Add(fc);
+                        }
+                        else if (part.ContainsKey("text"))
+                        {
+                            string t = part["text"] as string;
+                            if (!string.IsNullOrEmpty(t)) replyText.Append(t);
+                        }
+                    }
+
+                    string reply = replyText.ToString().Trim();
+                    if (reply.Length > 0)
+                    {
+                        string formattedHtml = MarkdownToHtml(reply);
+                        UiAppend("gemini", "GEMINI (" + model + ")", formattedHtml);
+                    }
+
+                    // Pas d'outil demandé : la réponse est terminée
+                    if (calls.Count == 0)
+                    {
+                        SaveSession();
+                        if (finishReason == "MAX_TOKENS")
+                            UiAppend("system", "SYSTÈME", "⚠ Réponse coupée par Gemini (longueur maximale atteinte). Demande-lui de continuer.");
+                        else if (reply.Length == 0)
+                            UiAppend("error", "GEMINI (" + model + ")", "Réponse sans texte (motif : " + WebUtility.HtmlEncode(finishReason ?? "inconnu") + ").");
+                        return;
+                    }
+
+                    // Exécution de TOUS les outils demandés, résultats renvoyés ensemble
+                    List<object> responseParts = new List<object>();
+                    foreach (Dictionary<string, object> funcCall in calls)
+                    {
+                        if (isCancelled) return;
+                        string funcName = funcCall.ContainsKey("name") ? funcCall["name"] as string : "";
+                        Dictionary<string, object> args = (funcCall.ContainsKey("args") ? funcCall["args"] as Dictionary<string, object> : null) ?? new Dictionary<string, object>();
+
+                        Dictionary<string, object> toolResult = ExecuteLocalTool(funcName, args);
+
+                        Dictionary<string, object> fr = new Dictionary<string, object> {
+                            { "name", funcName },
+                            { "response", toolResult }
+                        };
+                        if (funcCall.ContainsKey("id")) fr["id"] = funcCall["id"];
+                        responseParts.Add(new Dictionary<string, object> { { "functionResponse", fr } });
+                    }
+
+                    chatContents.Add(new Dictionary<string, object> {
+                        { "role", "user" },
+                        { "parts", responseParts }
+                    });
+                    SaveSession();
+                    // On boucle pour que Gemini analyse les résultats des outils
                 }
+
+                UiAppend("system", "SYSTÈME", "⚠ Limite de " + maxIterations + " étapes d'outils atteinte. Relance ta demande si l'analyse n'est pas finie.");
             }
             catch (WebException wex)
             {
@@ -998,7 +1313,10 @@ namespace GeminiDiagDirect
                 {
                     using (StreamReader sr = new StreamReader(wex.Response.GetResponseStream()))
                     {
-                        errMsg += "<br/><pre>" + WebUtility.HtmlEncode(sr.ReadToEnd()) + "</pre>";
+                        string body = sr.ReadToEnd();
+                        errMsg += "<br/><pre>" + WebUtility.HtmlEncode(body) + "</pre>";
+                        if (body.Contains("API_KEY_INVALID") || body.Contains("API key") || body.Contains("PERMISSION_DENIED"))
+                            errMsg += "<br/>🔑 La clé API semble refusée : clique sur le bouton 🔑 pour en saisir une nouvelle.";
                     }
                 }
 
@@ -1150,9 +1468,12 @@ namespace GeminiDiagDirect
 
                     using (Process p = Process.Start(psi))
                     {
-                        p.WaitForExit(15000);
-                        string output = p.StandardOutput.ReadToEnd();
-                        string error = p.StandardError.ReadToEnd();
+                        // lecture en parallèle : évite le blocage si la commande écrit beaucoup
+                        System.Threading.Tasks.Task<string> outTask = p.StandardOutput.ReadToEndAsync();
+                        System.Threading.Tasks.Task<string> errTask = p.StandardError.ReadToEndAsync();
+                        if (!p.WaitForExit(15000)) { try { p.Kill(); } catch { } }
+                        string output = outTask.Wait(2000) ? outTask.Result : "";
+                        string error = errTask.Wait(2000) ? errTask.Result : "";
                         string full = string.IsNullOrEmpty(error) ? output : output + "\nERREUR:\n" + error;
 
                         this.Invoke((MethodInvoker)delegate {
@@ -1335,9 +1656,11 @@ namespace GeminiDiagDirect
             System.Threading.ThreadPool.QueueUserWorkItem(state => {
                 try
                 {
-                    string url = "https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey;
+                    if (string.IsNullOrEmpty(apiKey)) return;
+                    string url = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000";
                     using (WebClient client = new WebClient())
                     {
+                        client.Headers.Add("x-goog-api-key", apiKey);
                         string json = client.DownloadString(url);
                         JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
                         Dictionary<string, object> obj = serializer.Deserialize<Dictionary<string, object>>(json);
@@ -1438,7 +1761,7 @@ namespace GeminiDiagDirect
                                 }
                             }
 
-                            if (role == "user")
+                            if (role == "user" && !string.IsNullOrEmpty(text))
                                 AppendMessageBlock("user", "VOUS", WebUtility.HtmlEncode(text.Trim()).Replace("\n", "<br/>"));
                             else if (role == "model" && !string.IsNullOrEmpty(text))
                                 AppendMessageBlock("gemini", "GEMINI", MarkdownToHtml(text.Trim()));

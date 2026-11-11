@@ -1,0 +1,69 @@
+name: Compilation et publication
+
+# À chaque push sur main : compilation de contrôle. Si VERSION (dans GeminiDiagDirect.cs) n'a pas encore
+# de Release vX.Y.Z, elle est créée automatiquement (tag compris) et proposée à l'eeePC au démarrage de l'appli.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lire VERSION et vérifier si la Release existe déjà
+        id: ver
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(sed -nE 's/.*public const string VERSION = "([^"]+)".*/\1/p' GeminiDiagDirect.cs)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"; echo "Compilation de contrôle (pas de publication)"
+          elif gh release view "v$V" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"; echo "v$V déjà publiée : compilation de contrôle seulement"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"; echo "Nouvelle version v$V : elle sera publiée"
+          fi
+
+      - name: Vérifier qu'aucune clé API n'est dans le code
+        shell: bash
+        run: |
+          if grep -nE 'AIza[0-9A-Za-z_-]{20,}|AQ\.[0-9A-Za-z_-]{20,}' GeminiDiagDirect.cs; then
+            echo "::error::Une clé API semble écrite dans le code. Elle doit rester dans C:\Diag\gemini.cfg."; exit 1
+          fi
+
+      - name: Compilation (csc .NET Framework 4, 32 bits, comme sur l'eeePC)
+        shell: cmd
+        run: compiler.bat
+
+      - name: Archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item GeminiDiagDirect.exe, logo.png, app.ico dist/
+          Copy-Item README.md dist/LISEZMOI.txt
+          Compress-Archive -Path dist/* -DestinationPath GeminiDiagDirect-win32.zip
+
+      - name: Garder l'archive (lancement manuel)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeminiDiagDirect-win32
+          path: GeminiDiagDirect-win32.zip
+
+      - name: Publier la version
+        if: steps.ver.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: Gemini Diag Direct ${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: GeminiDiagDirect-win32.zip
+          generate_release_notes: true
