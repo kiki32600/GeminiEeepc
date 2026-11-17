@@ -59,7 +59,7 @@ namespace GeminiDiagDirect
         private Panel bottomBar;
 
         // Version de l'appli : la changer ici déclenche une nouvelle publication sur GitHub
-        public const string VERSION = "2.0.0";
+        public const string VERSION = "2.1.0";
         public const string GITHUB_REPO = "kiki32600/GeminiEeepc";
         public const string UPDATE_ASSET = "GeminiDiagDirect-win32.zip";
 
@@ -77,6 +77,13 @@ namespace GeminiDiagDirect
 
         private int currentFontSize = 14;
         private List<Dictionary<string, object>> chatContents = new List<Dictionary<string, object>>();
+        private const string HISTORY_DIR = @"C:\Diag\Gemini_History";
+        private string sessionTitle = null;
+        private string sessionVehicle = null;
+        private string sessionModel = null;
+        private DateTime sessionCreated = DateTime.Now;
+        private bool suppressRender = false;
+        private bool restoringModel = false;
         private StringBuilder messagesHtml = new StringBuilder();
 
         private volatile HttpWebRequest activeWebRequest = null;
@@ -124,7 +131,8 @@ namespace GeminiDiagDirect
             apiKey = LoadApiKey();
 
             InitUI();
-            InitNewSession();
+            RestoreSavedModel();
+            if (!LoadLastSession()) InitNewSession();
 
             this.DragEnter += MainForm_DragEnter;
             this.DragDrop += MainForm_DragDrop;
@@ -163,8 +171,11 @@ namespace GeminiDiagDirect
             catch { return null; }
         }
 
-        private string LoadApiKey()
+        // ---------- CONFIGURATION (C:\Diag\gemini.cfg : cle_api=..., modele=...) ----------
+
+        private Dictionary<string, string> ReadConfig()
         {
+            Dictionary<string, string> cfg = new Dictionary<string, string>();
             try
             {
                 if (File.Exists(configPath))
@@ -174,26 +185,61 @@ namespace GeminiDiagDirect
                         string line = raw.Trim();
                         if (line.Length == 0 || line.StartsWith("#")) continue;
                         int eq = line.IndexOf('=');
-                        if (eq > 0)
-                        {
-                            string k = line.Substring(0, eq).Trim().ToLower();
-                            if (k == "cle_api" || k == "api_key") return line.Substring(eq + 1).Trim();
-                        }
-                        else return line; // fichier ne contenant que la clé
+                        if (eq > 0) cfg[line.Substring(0, eq).Trim().ToLower()] = line.Substring(eq + 1).Trim();
+                        else if (!cfg.ContainsKey("cle_api")) cfg["cle_api"] = line; // ancien fichier ne contenant que la clé
                     }
                 }
             }
             catch { }
+            if (cfg.ContainsKey("api_key") && !cfg.ContainsKey("cle_api")) cfg["cle_api"] = cfg["api_key"];
+            return cfg;
+        }
+
+        private void WriteConfigValue(string key, string value)
+        {
+            try
+            {
+                Dictionary<string, string> cfg = ReadConfig();
+                cfg.Remove("api_key");
+                cfg[key] = value;
+                StringBuilder sb = new StringBuilder("# Configuration de Gemini Diag Direct (ce fichier reste sur ce PC, ne le partage pas)\r\n");
+                foreach (KeyValuePair<string, string> kv in cfg) sb.Append(kv.Key + "=" + kv.Value + "\r\n");
+                Directory.CreateDirectory(DIAG_DIR);
+                File.WriteAllText(configPath, sb.ToString(), new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        private string LoadApiKey()
+        {
+            Dictionary<string, string> cfg = ReadConfig();
+            if (cfg.ContainsKey("cle_api") && cfg["cle_api"].Length > 0) return cfg["cle_api"];
             string env = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
             return string.IsNullOrEmpty(env) ? null : env.Trim();
         }
 
         private void SaveApiKey(string key)
         {
-            Directory.CreateDirectory(DIAG_DIR);
-            File.WriteAllText(configPath,
-                "# Configuration de Gemini Diag Direct (ce fichier reste sur ce PC, ne le partage pas)\r\n" +
-                "cle_api=" + key + "\r\n", new UTF8Encoding(false));
+            WriteConfigValue("cle_api", key);
+        }
+
+        // Sélectionne un modèle dans la liste (l'ajoute s'il n'y est pas) sans l'enregistrer comme choix de l'utilisateur
+        private void SelectModel(string model)
+        {
+            if (string.IsNullOrEmpty(model)) return;
+            restoringModel = true;
+            try
+            {
+                if (!cmbModel.Items.Contains(model)) cmbModel.Items.Add(model);
+                cmbModel.SelectedItem = model;
+            }
+            finally { restoringModel = false; }
+        }
+
+        private void RestoreSavedModel()
+        {
+            Dictionary<string, string> cfg = ReadConfig();
+            if (cfg.ContainsKey("modele")) SelectModel(cfg["modele"]);
         }
 
         private void AskApiKey(bool firstStart)
@@ -450,6 +496,9 @@ namespace GeminiDiagDirect
                 "gemini-3.1-pro-preview"
             });
             cmbModel.SelectedIndex = 0;
+            cmbModel.SelectedIndexChanged += (s, e) => {
+                if (!restoringModel && cmbModel.Text.Trim().Length > 0) WriteConfigValue("modele", cmbModel.Text.Trim());
+            };
 
             topBar.Controls.AddRange(new Control[] { 
                 picLogo, btnAttach, btnGarage, btnApiKey, btnNewSession, btnLoadHistory, 
@@ -820,7 +869,7 @@ namespace GeminiDiagDirect
                          "</div>\n";
 
             messagesHtml.Append(div);
-            RenderFullChatHtml();
+            if (!suppressRender) RenderFullChatHtml();
         }
 
         private void InitNewSession()
@@ -828,7 +877,11 @@ namespace GeminiDiagDirect
             chatContents.Clear();
             messagesHtml.Clear();
             ClearAttachment();
-            currentSessionFile = Path.Combine(@"C:\Diag\Gemini_History", DateTime.Now.ToString("yyyy-MM-dd_HHmmss") + "_Diag.json");
+            currentSessionFile = null; // le fichier est nommé au premier enregistrement (date - véhicule - sujet)
+            sessionTitle = null;
+            sessionVehicle = null;
+            sessionModel = null;
+            sessionCreated = DateTime.Now;
 
             AppendMessageBlock("system", "SYSTÈME ATELIER", 
                 "Session prête. <b>Mode Agent Autonome Activé</b>.<br/>" +
@@ -982,6 +1035,7 @@ namespace GeminiDiagDirect
             isAnalyzing = true;
             isCancelled = false;
             TrimDanglingToolCall();
+            CompactHistory(); // les CSV déjà analysés ne sont pas renvoyés à Gemini
 
             btnSend.Enabled = true;
             btnSend.Text = "⏹ STOP\n(Annuler)";
@@ -1009,7 +1063,7 @@ namespace GeminiDiagDirect
             if (attachedFilePath != null && File.Exists(attachedFilePath))
             {
                 string fileContent = File.ReadAllText(attachedFilePath, Encoding.Default);
-                string fileBlock = "\n--- FICHIER DIAG JOINT (" + Path.GetFileName(attachedFilePath) + ") ---\n" + fileContent + "\n--- FIN FICHIER ---\n";
+                string fileBlock = "\n--- FICHIER DIAG JOINT (" + Path.GetFileName(attachedFilePath) + ") [Chemin: " + attachedFilePath + "] ---\n" + fileContent + "\n--- FIN FICHIER ---\n";
                 text = (string.IsNullOrEmpty(text) ? "Analyse en détail ce relevé de diagnostic." : text) + "\n" + fileBlock;
                 badges += "<span class='badge'>📁 " + Path.GetFileName(attachedFilePath) + "</span> ";
             }
@@ -1032,6 +1086,8 @@ namespace GeminiDiagDirect
 
             string modelName = cmbModel.Text.Trim();
             if (string.IsNullOrEmpty(modelName)) modelName = "gemini-3.5-flash-lite";
+            sessionModel = modelName;
+            WriteConfigValue("modele", modelName);
 
             System.Threading.ThreadPool.QueueUserWorkItem(state => {
                 ExecuteAgentLoop(modelName);
@@ -1276,6 +1332,7 @@ namespace GeminiDiagDirect
                     // Pas d'outil demandé : la réponse est terminée
                     if (calls.Count == 0)
                     {
+                        CompactHistory();
                         SaveSession();
                         if (finishReason == "MAX_TOKENS")
                             UiAppend("system", "SYSTÈME", "⚠ Réponse coupée par Gemini (longueur maximale atteinte). Demande-lui de continuer.");
@@ -1707,8 +1764,8 @@ namespace GeminiDiagDirect
                                     if (!cmbModel.Items.Contains(m)) cmbModel.Items.Add(m);
                                 }
 
-                                if (cmbModel.Items.Contains(current)) cmbModel.SelectedItem = current;
-                                else cmbModel.SelectedIndex = 0;
+                                if (!string.IsNullOrEmpty(current)) SelectModel(current);
+                                else { restoringModel = true; cmbModel.SelectedIndex = 0; restoringModel = false; }
                             });
                         }
                     }
@@ -1717,69 +1774,267 @@ namespace GeminiDiagDirect
             });
         }
 
+        // ---------- HISTORIQUE DES CONVERSATIONS ----------
+        // Fichier : C:\Diag\Gemini_History\AAAA-MM-JJ_HHMM - VÉHICULE - sujet.json
+        // Contenu : { format, titre, vehicule, modele, cree_le, messages } ; les CSV analysés n'y sont pas gardés.
+
+        private static readonly Regex FileBlockRegex = new Regex(
+            @"--- FICHIER DIAG JOINT \((?<nom>[^)]*)\)(?<chemin> \[Chemin: [^\]]*\])? ---\r?\n(?<contenu>.*?)\r?\n--- FIN FICHIER ---",
+            RegexOptions.Singleline);
+
+        // Retire le contenu des fichiers joints et des fichiers lus par l'outil (Gemini peut les relire au besoin)
+        private bool CompactHistory()
+        {
+            bool changed = false;
+            foreach (Dictionary<string, object> msg in chatContents)
+            {
+                IEnumerable parts = msg.ContainsKey("parts") ? msg["parts"] as IEnumerable : null;
+                if (parts == null) continue;
+                foreach (object po in parts)
+                {
+                    Dictionary<string, object> part = po as Dictionary<string, object>;
+                    if (part == null) continue;
+
+                    string text = part.ContainsKey("text") ? part["text"] as string : null;
+                    if (text != null && text.Contains("--- FIN FICHIER ---"))
+                    {
+                        string compact = FileBlockRegex.Replace(text, m =>
+                            "--- FICHIER DIAG JOINT (" + m.Groups["nom"].Value + ")" + m.Groups["chemin"].Value +
+                            " : contenu retiré de l'historique après analyse (" + (m.Groups["contenu"].Value.Length / 1024) +
+                            " Ko). Relis-le avec l'outil lire_fichier_diag si besoin. ---");
+                        if (compact != text) { part["text"] = compact; changed = true; }
+                    }
+
+                    Dictionary<string, object> fr = part.ContainsKey("functionResponse") ? part["functionResponse"] as Dictionary<string, object> : null;
+                    Dictionary<string, object> resp = (fr != null && fr.ContainsKey("response")) ? fr["response"] as Dictionary<string, object> : null;
+                    if (resp != null && resp.ContainsKey("contenu"))
+                    {
+                        string c = resp["contenu"] as string;
+                        if (c != null && !c.StartsWith("(contenu retiré"))
+                        {
+                            resp["contenu"] = "(contenu retiré de l'historique après analyse, " + (c.Length / 1024) + " Ko ; relis le fichier avec lire_fichier_diag si besoin)";
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            return changed;
+        }
+
+        private static string PartsText(Dictionary<string, object> msg, bool withImages)
+        {
+            StringBuilder sb = new StringBuilder();
+            IEnumerable parts = msg.ContainsKey("parts") ? msg["parts"] as IEnumerable : null;
+            if (parts == null) return "";
+            foreach (object po in parts)
+            {
+                Dictionary<string, object> part = po as Dictionary<string, object>;
+                if (part == null) continue;
+                if (part.ContainsKey("thought") && part["thought"] is bool && (bool)part["thought"]) continue;
+                if (part.ContainsKey("text")) sb.Append(part["text"] as string).Append("\n");
+                else if (withImages && part.ContainsKey("inlineData")) sb.Append("[Image jointe]\n");
+            }
+            return sb.ToString();
+        }
+
+        private static string CleanFileName(string name)
+        {
+            foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, ' ');
+            name = Regex.Replace(name, @"\s+", " ").Trim().TrimEnd('.');
+            return name;
+        }
+
+        // Cherche dans la question un véhicule de la fiche garage : [807], [CX5], [CLK] ou la marque/le modèle de la ligne
+        private string DetectVehicle(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            HashSet<string> words = new HashSet<string>();
+            foreach (string w in Regex.Split(text.ToLowerInvariant(), @"[\s,;:!?'""()/]+"))
+            {
+                string n = Regex.Replace(w, @"[^\p{L}\p{N}]", "");
+                if (n.Length > 0) words.Add(n);
+            }
+            foreach (string raw in ReadGarage().Split('\n'))
+            {
+                Match m = Regex.Match(raw, @"^\s*\[([^\]]+)\]\s*(.*)$");
+                if (!m.Success) continue;
+                string tag = m.Groups[1].Value.Trim();
+                List<string> keys = new List<string> { tag };
+                string[] rest = m.Groups[2].Value.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < rest.Length && i < 2; i++) keys.Add(rest[i]);
+                foreach (string k in keys)
+                {
+                    string nk = Regex.Replace(k.ToLowerInvariant(), @"[^\p{L}\p{N}]", "");
+                    if (nk.Length >= 3 && words.Contains(nk)) return tag;
+                }
+            }
+            return null;
+        }
+
+        private string ComputeSessionTitle()
+        {
+            foreach (Dictionary<string, object> msg in chatContents)
+            {
+                if ((msg["role"] as string) != "user") continue;
+                string text = PartsText(msg, false);
+                string fileName = null;
+                Match fm = Regex.Match(text, @"--- FICHIER DIAG JOINT \(([^)]*)\)");
+                if (fm.Success)
+                {
+                    fileName = Path.GetFileNameWithoutExtension(fm.Groups[1].Value);
+                    text = text.Substring(0, fm.Index);
+                }
+                text = Regex.Replace(text, @"\s+", " ").Trim();
+                if (text.Length == 0 || text == "Analyse en détail ce relevé de diagnostic.")
+                    text = fileName != null ? "analyse " + fileName : "";
+                if (text.Length == 0) continue;
+                if (sessionVehicle == null) sessionVehicle = DetectVehicle(text);
+                if (text.Length > 45)
+                {
+                    int cut = text.LastIndexOf(' ', 45);
+                    text = text.Substring(0, cut > 20 ? cut : 45);
+                }
+                return text.TrimEnd(' ', '.', ',', '?', '!');
+            }
+            return "";
+        }
+
         private void SaveSession()
         {
             try
             {
+                if (currentSessionFile == null)
+                {
+                    sessionTitle = ComputeSessionTitle();
+                    string name = sessionCreated.ToString("yyyy-MM-dd_HHmm") +
+                                  (string.IsNullOrEmpty(sessionVehicle) ? "" : " - " + sessionVehicle) +
+                                  (string.IsNullOrEmpty(sessionTitle) ? "" : " - " + sessionTitle);
+                    name = CleanFileName(name);
+                    Directory.CreateDirectory(HISTORY_DIR);
+                    string path = Path.Combine(HISTORY_DIR, name + ".json");
+                    for (int i = 2; File.Exists(path); i++) path = Path.Combine(HISTORY_DIR, name + " (" + i + ").json");
+                    currentSessionFile = path;
+                }
+
+                Dictionary<string, object> doc = new Dictionary<string, object> {
+                    { "format", 2 },
+                    { "titre", sessionTitle ?? "" },
+                    { "vehicule", sessionVehicle ?? "" },
+                    { "modele", sessionModel ?? "" },
+                    { "cree_le", sessionCreated.ToString("s") },
+                    { "messages", chatContents }
+                };
                 JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-                string json = serializer.Serialize(chatContents);
-                File.WriteAllText(currentSessionFile, json, Encoding.UTF8);
+                File.WriteAllText(currentSessionFile, serializer.Serialize(doc), Encoding.UTF8);
             }
             catch { }
         }
 
+        // Au démarrage : rouvre la conversation la plus récente (le modèle reste le dernier choisi)
+        private bool LoadLastSession()
+        {
+            try
+            {
+                if (!Directory.Exists(HISTORY_DIR)) return false;
+                FileInfo latest = null;
+                foreach (FileInfo fi in new DirectoryInfo(HISTORY_DIR).GetFiles("*.json"))
+                {
+                    if (latest == null || fi.LastWriteTime > latest.LastWriteTime) latest = fi;
+                }
+                if (latest == null) return false;
+                LoadSessionFile(latest.FullName, false);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private void LoadSession()
         {
-            using (OpenFileDialog ofd = new OpenFileDialog { InitialDirectory = @"C:\Diag\Gemini_History", Filter = "Sessions (*.json)|*.json" })
+            using (OpenFileDialog ofd = new OpenFileDialog { InitialDirectory = HISTORY_DIR, Filter = "Conversations (*.json)|*.json" })
             {
                 if (ofd.ShowDialog() == DialogResult.OK)
                 {
                     try
                     {
-                        string json = File.ReadAllText(ofd.FileName, Encoding.UTF8);
-                        JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-                        ArrayList loaded = serializer.Deserialize<ArrayList>(json);
-
-                        if (loaded == null) return;
-
-                        chatContents.Clear();
-                        messagesHtml.Clear();
-                        currentSessionFile = ofd.FileName;
-
-                        foreach (object item in loaded)
-                        {
-                            Dictionary<string, object> msg = item as Dictionary<string, object>;
-                            if (msg == null) continue;
-
-                            chatContents.Add(msg);
-                            string role = (string)msg["role"];
-                            ArrayList parts = msg["parts"] as ArrayList;
-                            string text = "";
-                            if (parts != null)
-                            {
-                                foreach (object p in parts)
-                                {
-                                    Dictionary<string, object> partDict = p as Dictionary<string, object>;
-                                    if (partDict == null) continue;
-
-                                    if (partDict.ContainsKey("text"))
-                                        text += (string)partDict["text"] + "\n";
-                                    else if (partDict.ContainsKey("inlineData"))
-                                        text += "[Image jointe]\n";
-                                }
-                            }
-
-                            if (role == "user" && !string.IsNullOrEmpty(text))
-                                AppendMessageBlock("user", "VOUS", WebUtility.HtmlEncode(text.Trim()).Replace("\n", "<br/>"));
-                            else if (role == "model" && !string.IsNullOrEmpty(text))
-                                AppendMessageBlock("gemini", "GEMINI", MarkdownToHtml(text.Trim()));
-                        }
+                        LoadSessionFile(ofd.FileName, true);
                     }
                     catch (Exception ex)
                     {
                         MessageBox.Show("Erreur au chargement : " + ex.Message);
+                        InitNewSession();
                     }
                 }
+            }
+        }
+
+        private void LoadSessionFile(string path, bool applyModel)
+        {
+            string json = File.ReadAllText(path, Encoding.UTF8);
+            JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+
+            ArrayList loaded;
+            Dictionary<string, object> meta = null;
+            if (json.TrimStart().StartsWith("["))
+                loaded = serializer.Deserialize<ArrayList>(json); // ancien format : liste de messages seule
+            else
+            {
+                meta = serializer.Deserialize<Dictionary<string, object>>(json);
+                loaded = meta.ContainsKey("messages") ? meta["messages"] as ArrayList : null;
+            }
+            if (loaded == null) throw new InvalidDataException("fichier de conversation vide ou illisible");
+
+            chatContents.Clear();
+            messagesHtml.Clear();
+            ClearAttachment();
+            currentSessionFile = path;
+            sessionTitle = meta != null && meta.ContainsKey("titre") ? meta["titre"] as string : Path.GetFileNameWithoutExtension(path);
+            sessionVehicle = meta != null && meta.ContainsKey("vehicule") ? meta["vehicule"] as string : null;
+            sessionModel = meta != null && meta.ContainsKey("modele") ? meta["modele"] as string : null;
+            DateTime created;
+            sessionCreated = (meta != null && meta.ContainsKey("cree_le") && DateTime.TryParse(meta["cree_le"] as string, out created))
+                ? created : File.GetCreationTime(path);
+
+            if (applyModel && !string.IsNullOrEmpty(sessionModel))
+            {
+                SelectModel(sessionModel);
+                WriteConfigValue("modele", sessionModel);
+            }
+
+            suppressRender = true; // un seul affichage à la fin : plus rapide sur l'eeePC
+            try
+            {
+                AppendMessageBlock("system", "SYSTÈME", "📂 Conversation reprise : <b>" + WebUtility.HtmlEncode(Path.GetFileNameWithoutExtension(path)) +
+                    "</b>" + (string.IsNullOrEmpty(sessionModel) ? "" : " (modèle " + WebUtility.HtmlEncode(sessionModel) + ")") +
+                    ". Bouton 🔄 Nouveau pour en démarrer une autre.");
+
+                foreach (object item in loaded)
+                {
+                    Dictionary<string, object> msg = item as Dictionary<string, object>;
+                    if (msg == null || !msg.ContainsKey("role")) continue;
+                    chatContents.Add(msg);
+                }
+                bool compacted = CompactHistory();
+
+                foreach (Dictionary<string, object> msg in chatContents)
+                {
+                    string role = msg["role"] as string;
+                    string text = PartsText(msg, true).Trim();
+                    if (text.Length == 0) continue;
+                    if (role == "user")
+                        AppendMessageBlock("user", "VOUS", WebUtility.HtmlEncode(text).Replace("\n", "<br/>"));
+                    else if (role == "model")
+                        AppendMessageBlock("gemini", "GEMINI" + (string.IsNullOrEmpty(sessionModel) ? "" : " (" + sessionModel + ")"), MarkdownToHtml(text));
+                }
+
+                if (compacted || meta == null) SaveSession(); // allège les anciens fichiers et passe au nouveau format
+            }
+            finally
+            {
+                suppressRender = false;
+                RenderFullChatHtml();
             }
         }
     }
